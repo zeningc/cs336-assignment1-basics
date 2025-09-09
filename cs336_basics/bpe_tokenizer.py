@@ -35,12 +35,6 @@ class BPETokenizer:
                 merges.append((a.encode("utf-8"), b.encode("utf-8")))
         return BPETokenizer(vocab, merges, special_tokens)
 
-    def _is_special(self, s: str) -> bool:
-        if not self.special_tokens:
-            return False
-        # exact match against any special (string form)
-        return s in self.special_tokens
-
     def _encode_pretoken(self, pre: str) -> List[int]:
         """
         Encode a single pre-token:
@@ -66,13 +60,11 @@ class BPETokenizer:
             # Scan-and-rewrite: replace every (a,c) with (ab)
             out: List[bytes] = []
             i = 0
-            changed = False
             n = len(seq)
             while i < n:
                 if i + 1 < n and seq[i] == a and seq[i + 1] == c:
                     out.append(ab)
                     i += 2
-                    changed = True
                 else:
                     out.append(seq[i])
                     i += 1
@@ -90,18 +82,26 @@ class BPETokenizer:
         Split text so that special tokens appear as standalone elements in the list.
         """
         if not self.special_tokens:
-            return [text]
+            yield False, text
+            return
 
-        parts = self._specials_re.split(text)  # [text, special, text, special, ...]
-        # keep empty pieces? Typically harmless, PAT will ignore.
-        return [p for p in parts if p != ""]
+        pos = 0
+        for m in self._specials_re.finditer(text):
+            start, end = m.span()
+            if start > pos:
+                yield False, text[pos:start]  # non-special span
+            s = m.group(0)
+            yield True, s  # special token
+            pos = end
+        if pos < len(text):
+            yield False, text[pos:]
 
 
     def encode(self, text: str) -> list[int]:
 
         ids: List[int] = []
-        for piece in self._split_on_specials(text):
-            if self._is_special(piece):
+        for is_special, piece in self._split_on_specials(text):
+            if is_special:
                 # Emit special id directly
                 sid = self._id_for[piece.encode("utf-8")]
                 ids.append(sid)
@@ -114,8 +114,8 @@ class BPETokenizer:
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
         for text in iterable:
-            for piece in self._split_on_specials(text):
-                if self._is_special(piece):
+            for is_special, piece in self._split_on_specials(text):
+                if is_special:
                     yield self._id_for[piece.encode("utf-8")]
                 else:
                     for m in self._pat_re.finditer(piece):
