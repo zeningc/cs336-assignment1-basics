@@ -19,6 +19,19 @@ class BPETokenizer:
             specials_sorted = sorted(set(self.special_tokens), key=len, reverse=True)
             pattern = "(" + "|".join(re.escape(s) for s in specials_sorted) + ")"
             self._specials_re = re.compile(pattern)
+        self._id_for: Dict[bytes, int] = {b: i for i, b in self.vocab.items()}
+
+        # intern single-byte tokens to avoid re-allocating bytes([x])
+        self._single_bytes = [bytes([i]) for i in range(256)]
+        # optional small cache for repeated words
+        self._word_cache: Dict[bytes, List[int]] = {}
+        # build (a,b) -> id(a+b) so we don't concat bytes in the hot loop
+        self._pair2id: Dict[tuple[bytes, bytes], int] = {}
+        for a, b in self.merges:
+            ab = a + b
+            tid = self._id_for.get(ab)
+            if tid is not None:
+                self._pair2id[(a, b)] = tid
 
     def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
         with open(vocab_filepath, "r", encoding="utf-8") as f:
@@ -36,46 +49,52 @@ class BPETokenizer:
         return BPETokenizer(vocab, merges, special_tokens)
 
     def _encode_pretoken(self, pre: str) -> List[int]:
-        """
-        Encode a single pre-token:
-          - start as a tuple of single-byte tokens (b'x' length-1 each)
-          - apply merges in *the order they were created* (assignment requirement)
-          - map resulting byte-chunks to ids
-        """
-        # Start as a sequence of one-byte tokens (bytes objects length==1)
         b = pre.encode("utf-8")
-        seq: List[bytes] = [bytes([x]) for x in b]
-
-        if not seq:
+        if not b:
             return []
 
-        # Apply merges in creation order, greedily replacing all occurrences each time
-        for a, c in self.merges:
-            if not seq:
-                break
-            if len(seq) == 1:
-                # A single token cannot contain a pair
-                continue
-            ab = a + c
-            # Scan-and-rewrite: replace every (a,c) with (ab)
-            out: List[bytes] = []
-            i = 0
-            n = len(seq)
-            while i < n:
-                if i + 1 < n and seq[i] == a and seq[i + 1] == c:
-                    out.append(ab)
-                    i += 2
-                else:
-                    out.append(seq[i])
-                    i += 1
-            seq = out
+        # cache by raw bytes of the pretoken
+        cached = self._word_cache.get(b)
+        if cached is not None:
+            return cached[:]  # copy to avoid external mutation
 
-        # Finally map byte-chunks to ids
+        # start from 1-byte tokens using interned table
+        seq: List[bytes] = [self._single_bytes[x] for x in b]
+        if len(seq) == 1:
+            tid = self._id_for.get(seq[0])
+            out = [tid] if tid is not None else []
+            self._word_cache[b] = out[:]
+            return out
+
+        # Iteratively merge: at each step, pick neighbor pair with the smallest id
+        while len(seq) > 1:
+            best_id = None
+            best_pos = -1
+
+            # lookup pair ids via tuple (no bytes concatenation here)
+            for i in range(len(seq) - 1):
+                tid = self._pair2id.get((seq[i], seq[i + 1]))
+                if tid is not None and (best_id is None or tid < best_id):
+                    best_id = tid
+                    best_pos = i
+
+            if best_pos < 0:
+                break
+
+            # merge in place (we do need the merged bytes once)
+            merged = seq[best_pos] + seq[best_pos + 1]
+            seq[best_pos:best_pos + 2] = [merged]
+
+        # map to ids, skip unknowns
         out_ids: List[int] = []
         for tok in seq:
             tid = self._id_for.get(tok)
-            out_ids.append(tid)
+            if tid is not None:
+                out_ids.append(tid)
+
+        self._word_cache[b] = out_ids[:]
         return out_ids
+
 
     def _split_on_specials(self, text: str) -> List[str]:
         """
