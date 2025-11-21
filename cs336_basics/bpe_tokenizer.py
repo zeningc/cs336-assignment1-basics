@@ -1,10 +1,38 @@
-from typing import Iterable, Dict, Iterator, List
+from typing import Iterable, Dict, Iterator, List, Tuple
 import regex as re
 import json
+
 
 class BPETokenizer:
     PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
     REPLACEMENT_BYTES = "\uFFFD".encode("utf-8")
+
+    @staticmethod
+    def gpt2_bytes_to_unicode() -> Dict[int, str]:
+        """
+        GPT-2's reversible byte<->unicode mapping.
+        Maps raw bytes to printable unicode strings for vocab.json/merges.txt.
+        """
+        bs = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
+        cs = bs[:]
+        n = 0
+        for b in range(256):
+            if b not in bs:
+                bs.append(b)
+                cs.append(256 + n)
+                n += 1
+        cs = [chr(c) for c in cs]
+        return dict(zip(bs, cs))
+
+    @staticmethod
+    def encode_token_bytes(b: bytes, b2u: Dict[int, str]) -> str:
+        """Encode a raw bytes token into GPT-2-style unicode string."""
+        return "".join(b2u[x] for x in b)
+
+    @staticmethod
+    def decode_gpt2_token_str(s: str, u2b: Dict[str, int]) -> bytes:
+        """Decode a GPT-2-style unicode string back to raw bytes."""
+        return bytes(u2b[c] for c in s)
 
     def __init__(self, vocab, merges, special_tokens=None):
         self.vocab = vocab
@@ -33,10 +61,22 @@ class BPETokenizer:
             if tid is not None:
                 self._pair2id[(a, b)] = tid
 
+    @classmethod
     def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
+        """Load BPETokenizer from GPT-2 style vocab.json and merges.txt files."""
+        # Create unicode-to-byte mapping for decoding GPT-2 format
+        b2u = cls.gpt2_bytes_to_unicode()
+        u2b = {v: k for k, v in b2u.items()}
+
+        # Load vocab.json and decode from GPT-2 unicode format to bytes
         with open(vocab_filepath, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        vocab = {idx: tok.encode("utf-8") for tok, idx in raw.items()}
+            raw = json.load(f)  # {"token_str": id}
+        vocab = {}
+        for token_str, token_id in raw.items():
+            token_bytes = cls.decode_gpt2_token_str(token_str, u2b)
+            vocab[token_id] = token_bytes
+
+        # Load merges.txt and decode from GPT-2 unicode format to bytes
         merges = []
         with open(merges_filepath, "r", encoding="utf-8") as f:
             for line in f:
@@ -44,9 +84,14 @@ class BPETokenizer:
                 if not line or line.startswith("#"):
                     continue  # skip blanks/comments
                 parts = line.split()
-                a, b = parts
-                merges.append((a.encode("utf-8"), b.encode("utf-8")))
-        return BPETokenizer(vocab, merges, special_tokens)
+                if len(parts) != 2:
+                    continue
+                a_str, b_str = parts
+                a_bytes = cls.decode_gpt2_token_str(a_str, u2b)
+                b_bytes = cls.decode_gpt2_token_str(b_str, u2b)
+                merges.append((a_bytes, b_bytes))
+
+        return cls(vocab, merges, special_tokens)
 
     def _encode_pretoken(self, pre: str) -> List[int]:
         b = pre.encode("utf-8")
@@ -96,7 +141,7 @@ class BPETokenizer:
         return out_ids
 
 
-    def _split_on_specials(self, text: str) -> List[str]:
+    def _split_on_specials(self, text: str) -> Iterator[Tuple[bool, str]]:
         """
         Split text so that special tokens appear as standalone elements in the list.
         """

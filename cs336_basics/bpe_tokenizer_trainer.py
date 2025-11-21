@@ -105,12 +105,4 @@ class BPETokenizerTrainer:
 
 
 
-        return vocab, merges
-
-
-
-
-
-
-
 
