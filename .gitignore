@@ -166,4 +166,5 @@ cython_debug/
 # Training data & checkpoint
 data/
 runs/
+wandb/
 .claude/
