@@ -1,4 +1,5 @@
 import os
+import logging
 from collections import Counter
 from multiprocessing import Pool
 from typing import BinaryIO, Optional, List, Tuple
@@ -94,7 +95,8 @@ class BPEPreTokenizer:
     ) -> Counter:
         """
         Worker-safe function: re-compile regexes inside the process (avoids pickling compiled objects).
-        1) Read chunk bytes
+        Streams through the chunk in smaller sub-chunks to avoid loading entire chunk into RAM.
+        1) Read chunk bytes in sub-chunks
         2) Decode to str
         3) Remove special tokens (split and drop specials)
         4) finditer(PAT) over remaining text
@@ -103,28 +105,90 @@ class BPEPreTokenizer:
         pat_re = re.compile(BPETokenizer.PAT)
         specials_re = re.compile(self._specials_alt)
 
-        with open(filename, "rb") as f:
-            f.seek(start)
-            chunk_bytes = f.read(end - start)
-
-        # Decode chunk to str for regex with Unicode properties; ignore edge noise by default
-        text = chunk_bytes.decode("utf-8")
-
-        # Remove special tokens by splitting on them and keeping only non-special parts
-        parts = specials_re.split(text)  # [text, tok, text, tok, ...]
-        content_parts = [p for p in parts if p not in self.special_tokens and p != ""]
-
+        # Process in sub-chunks to avoid loading entire chunk into memory
+        # For a 2GB chunk, this processes 100MB at a time
+        sub_chunk_size = 100 * 1024 * 1024  # 100 MB sub-chunks
         counts = Counter()
-        for piece in content_parts:
-            for m in pat_re.finditer(piece):
-                token_str = m.group(0)
-                key = self._bytes_tuple_from_str_token(token_str)
-                counts[key] += 1
+
+        total_size = end - start
+        current_pos = start
+        leftover = b""  # Buffer for incomplete tokens at chunk boundaries
+        sub_chunks_processed = 0
+
+        # Log chunk processing start
+        chunk_mb = total_size / (1024 * 1024)
+        logging.info(f"Worker processing chunk {start}-{end} ({chunk_mb:.1f} MB)")
+
+        with open(filename, "rb") as f:
+            while current_pos < end:
+                # Calculate how much to read
+                bytes_to_read = min(sub_chunk_size, end - current_pos)
+
+                f.seek(current_pos)
+                chunk_bytes = f.read(bytes_to_read)
+
+                # Combine with leftover from previous iteration
+                chunk_bytes = leftover + chunk_bytes
+
+                # Try to decode; if we end mid-character, save the incomplete bytes
+                try:
+                    text = chunk_bytes.decode("utf-8")
+                    leftover = b""
+                except UnicodeDecodeError:
+                    # Find the last valid UTF-8 character boundary
+                    # Keep trying to decode smaller chunks from the end
+                    for i in range(1, min(5, len(chunk_bytes)) + 1):  # UTF-8 chars are max 4 bytes
+                        try:
+                            text = chunk_bytes[:-i].decode("utf-8")
+                            leftover = chunk_bytes[-i:]
+                            break
+                        except UnicodeDecodeError:
+                            continue
+                    else:
+                        # If we can't decode at all, skip this problematic section
+                        text = chunk_bytes.decode("utf-8", errors="ignore")
+                        leftover = b""
+
+                # Remove special tokens by splitting on them and keeping only non-special parts
+                parts = specials_re.split(text)  # [text, tok, text, tok, ...]
+                content_parts = [p for p in parts if p not in self.special_tokens and p != ""]
+
+                for piece in content_parts:
+                    for m in pat_re.finditer(piece):
+                        token_str = m.group(0)
+                        key = self._bytes_tuple_from_str_token(token_str)
+                        counts[key] += 1
+
+                current_pos += bytes_to_read
+                sub_chunks_processed += 1
+
+                # Log progress every 10 sub-chunks (every ~1GB for 100MB sub-chunks)
+                if sub_chunks_processed % 10 == 0:
+                    progress_pct = ((current_pos - start) / total_size) * 100
+                    logging.info(f"Worker chunk {start}-{end}: {progress_pct:.1f}% complete ({sub_chunks_processed} sub-chunks processed)")
+
+        # Process any leftover bytes at the end
+        if leftover:
+            try:
+                text = leftover.decode("utf-8")
+                parts = specials_re.split(text)
+                content_parts = [p for p in parts if p not in self.special_tokens and p != ""]
+
+                for piece in content_parts:
+                    for m in pat_re.finditer(piece):
+                        token_str = m.group(0)
+                        key = self._bytes_tuple_from_str_token(token_str)
+                        counts[key] += 1
+            except UnicodeDecodeError:
+                # Ignore incomplete UTF-8 at very end
+                pass
+
+        logging.info(f"Worker chunk {start}-{end}: Complete! Found {len(counts)} unique token types")
         return counts
 
     def pre_tokenize_count_parallel(
             self,
-            num_workers: int = 4,
+            num_workers: int = 20,
     ) -> Counter:
         """
         Parallel pre-tokenization count:
