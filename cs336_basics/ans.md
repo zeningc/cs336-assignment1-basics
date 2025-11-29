@@ -4,7 +4,7 @@
 
 ## Tuning Batch Size
 ### Run Result
-- 128: https://wandb.ai/zeningc-yale-university/cs336-transformer/runs/n1pgxfba?nw=nwuserzeningc
+- 128: https://wandb.ai/zeningc-yale-university/cs336-transformer/runs/n1pgxfba
 - 64: https://wandb.ai/zeningc-yale-university/cs336-transformer/runs/cwyq065j
 - 32: https://wandb.ai/zeningc-yale-university/cs336-transformer/runs/sdpmta2d
 ### Conclusion
@@ -45,3 +45,17 @@ Overall, removing positional information does not break optimization—the model
 - SiLU: https://wandb.ai/zeningc-yale-university/cs336-transformer/runs/ay4mv0i4
 ### Conclusion
 With matched parameter counts, SwiGLU consistently outperformed SiLU. The SwiGLU model achieved a lower final validation loss (1.34 vs. 1.40) and showed faster convergence. This supports the common practice of using gated feed-forward layers in modern LLMs to improve parameter efficiency and model quality.
+
+## Experiment on OWT
+### Run Result
+- OWT: https://wandb.ai/zeningc-yale-university/cs336-transformer/runs/rokbsi26
+- TinyStory: https://wandb.ai/zeningc-yale-university/cs336-transformer/runs/n1pgxfba?nw=nwuserzeningc
+
+### Conclusion
+The OpenWebText model achieves a significantly higher cross-entropy loss than the TinyStories model throughout training, even though we use the same architecture and total number of updates. TinyStories converges faster and to a lower final loss.
+The higher loss on OpenWebText does not mean the OWT model is “worse” than the TinyStories model; instead, it reflects that OpenWebText has much higher entropy and is intrinsically harder to predict. Given the same model size and compute budget, the model can cover a much larger fraction of the TinyStories distribution than of the OpenWebText distribution.
+Subjectively, the TinyStories model produces more coherent, story-like text, whereas the OpenWebText model often produces text that is locally fluent but drifts in topic or loses coherence over longer spans.
+Even though we use the same architecture and compute budget for TinyStories and OpenWebText, the resulting models do not achieve comparable quality. TinyStories is a much simpler, lower-entropy distribution, so the model can fit it well and generate highly fluent, story-like samples. OpenWebText, in contrast, is far more diverse and complex. With the same compute, the model remains underfit, leading to higher losses and noticeably worse sample quality.
+
+## Exploration
+- Run: https://wandb.ai/zeningc-yale-university/cs336-transformer/runs/84dpupt7
